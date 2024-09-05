@@ -4,9 +4,17 @@ use wasm_bindgen::JsValue;
 use yew::prelude::*;
 
 fn main() {
+    // log("start");
+    // for i in 0..100000000 {
+    //     if i % 10000 == 0 {
+    //         log(format!("{i}"))
+    //     }
+    // }
+    // なんか一気にlogが描画されるせいでちゃんと動いてるのかわかりにくい。
+    let game = train();
     let document = gloo::utils::document();
     let target_element = document.get_element_by_id("onthis").unwrap();
-    yew::Renderer::<App>::with_root(target_element).render();
+    yew::Renderer::<App>::with_root_and_props(target_element, StartAppGame { game }).render();
 }
 
 const W: usize = 200;
@@ -23,7 +31,7 @@ const MUT_NUM: usize = 5;
 const MUT_CPY: usize = 2;
 const MUT_MUCH: usize = 100;
 
-const TRAIN_STEPMAX: usize = 1000;
+const TRAIN_STEPMAX: usize = 100;
 const TRAIN_NUM: usize = 50;
 
 #[derive(Debug, Clone, PartialEq, Properties)]
@@ -174,6 +182,7 @@ impl OneGame {
                 }
             }
         }
+        // log("A");
         let chans = (0..CHAN_NUM)
             .map(|_| {
                 let pos = (rng.gen_range(0..H), rng.gen_range(0..W));
@@ -186,7 +195,7 @@ impl OneGame {
                 })
             })
             .collect::<Vec<_>>();
-
+        // log("B");
         Self {
             remain: CHAN_NUM,
             field: Field { field },
@@ -287,10 +296,10 @@ fn nice_gene(
 }
 
 fn train() -> OneGame {
-    log("start");
+    // log("start");
     let mut game = OneGame::new();
     'a: for i in 0..TRAIN_NUM {
-        log(format!("train {i}"));
+        // log(format!("train {i}"));
         for _ in 0..TRAIN_STEPMAX {
             game.step();
             if game.is_end() {
@@ -443,14 +452,20 @@ enum Msg {
     End,
 }
 
+#[derive(Debug, Clone, PartialEq, Properties)]
+struct StartAppGame {
+    game: OneGame,
+}
+
 impl Component for App {
     type Message = Msg;
-    type Properties = ();
+    type Properties = StartAppGame;
     fn create(ctx: &Context<Self>) -> Self {
         let callback = ctx.link().callback(|_| Msg::Tick);
         let interval = Interval::new(10, move || callback.emit(()));
+        let StartAppGame { game } = ctx.props();
         Self {
-            game: train(),
+            game: game.clone(),
             interval,
         }
     }
