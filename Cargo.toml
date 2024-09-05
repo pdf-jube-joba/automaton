@@ -1,0 +1,11 @@
+[package]
+name = "midori-chan"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rand = "0.8.5"
+yew = { version = "0.21.0", features = ["csr"] }
+gloo = "0.8.0"
+wasm-bindgen = "0.2.84"
+web-sys = { version = "0.3.61", features = ["DragEvent", "DataTransfer", "InputEvent", "FileReaderSync"]}
