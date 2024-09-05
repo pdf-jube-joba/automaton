@@ -1,21 +1,26 @@
+use gloo::timers::callback::Interval;
 use rand::prelude::*;
 use yew::prelude::*;
 
 fn main() {
-    let game = OneGame::new();
     let document = gloo::utils::document();
     let target_element = document.get_element_by_id("onthis").unwrap();
-    yew::Renderer::<OneGameView>::with_root_and_props(target_element, game).render();
+    yew::Renderer::<App>::with_root(target_element).render();
 }
 
 const W: usize = 200;
-const H: usize = 200;
+const H: usize = 150;
 const P_FOOD: f64 = 0.3;
 
-const MAXHP: usize = 100;
-const RECOVER: usize = 10;
+const MAXHP: usize = 20;
+const RECOVER: usize = 5;
 
 const CHAN_NUM: usize = 50;
+
+const MIX_NUM: usize = 5;
+const MUT_NUM: usize = 5;
+const MUT_CPY: usize = 2;
+const MUT_MUCH: usize = 100;
 
 #[derive(Debug, Clone, PartialEq, Properties)]
 
@@ -147,7 +152,7 @@ fn rotate_from_chan(diff: (isize, isize), ori: Ori) -> (isize, isize) {
 struct OneGame {
     remain: usize,
     field: Field,
-    chans: Vec<Result<Chan, usize>>,
+    chans: Vec<Result<Chan, (usize, Gene)>>,
 }
 
 impl OneGame {
@@ -175,7 +180,36 @@ impl OneGame {
             .collect::<Vec<_>>();
 
         Self {
-            remain: 0,
+            remain: CHAN_NUM,
+            field: Field { field },
+            chans,
+        }
+    }
+    fn from_gene(genes: Vec<Gene>) -> Self {
+        assert_eq!(genes.len(), CHAN_NUM);
+        let mut rng = thread_rng();
+        let mut field = [[false; W]; H];
+        for i in 0..H {
+            for j in 0..W {
+                if rng.gen_bool(P_FOOD) {
+                    field[i][j] = true;
+                }
+            }
+        }
+        let mut chans = vec![];
+        for gene in genes {
+            let pos = (rng.gen_range(0..H), rng.gen_range(0..W));
+            let chan = Chan {
+                pos,
+                hp: MAXHP,
+                act: gene,
+                mem: 0,
+                ori: Ori::U,
+            };
+            chans.push(Ok(chan));
+        }
+        Self {
+            remain: CHAN_NUM,
             field: Field { field },
             chans,
         }
@@ -233,10 +267,11 @@ impl OneGame {
             }
             if field.field[chan.pos.0][chan.pos.1] {
                 chan.hp = std::cmp::max(chan.hp + RECOVER, MAXHP);
+                field.field[chan.pos.0][chan.pos.1] = false;
             }
             if chan.hp == 0 {
-                *chan_opt = Err(*remain);
-                *remain += 1;
+                *chan_opt = Err((*remain, chan.act.clone()));
+                *remain -= 1;
             } else {
                 chan.hp -= 1;
             }
@@ -244,12 +279,32 @@ impl OneGame {
     }
 }
 
-const LEN: usize = 5;
-
-#[function_component(OneGameView)]
-fn onegame_view(
+fn nice_gene(
     OneGame {
         remain,
+        field,
+        chans,
+    }: &OneGame,
+) -> Vec<Gene> {
+    let mut gene_order: Vec<_> = chans
+        .iter()
+        .filter_map(|result| {
+            if let Err(order) = result {
+                Some(order.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    gene_order.sort_by_key(|(o, g)| *o);
+    gene_order.into_iter().map(|(o, g)| g).collect()
+}
+
+const LEN: usize = 5;
+
+fn onegame_view(
+    OneGame {
+        remain: _,
         field,
         chans,
     }: &OneGame,
@@ -267,7 +322,6 @@ fn onegame_view(
                 None
             }
         })}
-        {rect((20, 20), (50,50), "green".to_string())}
         </svg>
         </>
     }
@@ -306,7 +360,87 @@ fn chan_view(
 ) -> Html {
     circle(
         (pos.0 * LEN + LEN / 2, pos.1 * LEN + LEN / 2),
-        LEN,
+        LEN / 2,
         "green".to_string(),
     )
+}
+
+#[derive(Debug)]
+struct App {
+    game: OneGame,
+    #[allow(dead_code)]
+    interval: Interval,
+}
+
+enum Msg {
+    Tick,
+    End,
+}
+
+impl Component for App {
+    type Message = Msg;
+    type Properties = ();
+    fn create(ctx: &Context<Self>) -> Self {
+        let callback = ctx.link().callback(|_| Msg::Tick);
+        let interval = Interval::new(10, move || callback.emit(()));
+        Self {
+            game: OneGame::new(),
+            interval,
+        }
+    }
+    fn view(&self, ctx: &Context<Self>) -> Html {
+        if self.game.remain == 0 {
+            ctx.link().send_message(Msg::End);
+        }
+        onegame_view(&self.game)
+    }
+    fn update(&mut self, _ctx: &Context<Self>, msg: Self::Message) -> bool {
+        match msg {
+            Msg::Tick => {
+                self.game.step();
+                true
+            }
+            Msg::End => {
+                let mut genes = nice_gene(&self.game);
+                // top n の mix
+                let mix_genes = {
+                    let mut v = vec![];
+                    for i in 0..MIX_NUM {
+                        for j in 0..MIX_NUM {
+                            if i != j {
+                                v.push(genes[i].mix(&genes[j]));
+                            }
+                        }
+                    }
+                    v
+                };
+                // top n の mutate
+                let mut_genes = {
+                    let mut v = vec![];
+                    for i in 0..MUT_NUM {
+                        for _ in 0..MUT_CPY {
+                            let mut g = genes[i].clone();
+                            g.mutate(MUT_MUCH);
+                            v.push(g);
+                        }
+                    }
+                    v
+                };
+
+                for _ in 0..mix_genes.len() {
+                    genes.pop();
+                }
+
+                for _ in 0..mut_genes.len() {
+                    genes.pop();
+                }
+
+                genes.extend(mix_genes);
+                genes.extend(mut_genes);
+
+                self.game = OneGame::from_gene(genes);
+                true
+            }
+        }
+    }
 }
