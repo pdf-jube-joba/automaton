@@ -1,5 +1,6 @@
 use gloo::timers::callback::Interval;
 use rand::prelude::*;
+use wasm_bindgen::JsValue;
 use yew::prelude::*;
 
 fn main() {
@@ -12,7 +13,7 @@ const W: usize = 200;
 const H: usize = 150;
 const P_FOOD: f64 = 0.3;
 
-const MAXHP: usize = 20;
+const MAXHP: usize = 15;
 const RECOVER: usize = 5;
 
 const CHAN_NUM: usize = 50;
@@ -22,10 +23,17 @@ const MUT_NUM: usize = 5;
 const MUT_CPY: usize = 2;
 const MUT_MUCH: usize = 100;
 
+const TRAIN_STEPMAX: usize = 1000;
+const TRAIN_NUM: usize = 50;
+
 #[derive(Debug, Clone, PartialEq, Properties)]
 
 struct Field {
     field: [[bool; W]; H],
+}
+
+pub fn log<T: AsRef<str>>(str: T) {
+    web_sys::console::log_1(&JsValue::from_str(str.as_ref()))
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -214,6 +222,85 @@ impl OneGame {
             chans,
         }
     }
+
+    fn is_end(&self) -> bool {
+        self.remain == 0
+    }
+
+    fn end(&mut self) -> Self {
+        let mut genes = nice_gene(&self);
+        // top n の mix
+        let mix_genes = {
+            let mut v = vec![];
+            for i in 0..MIX_NUM {
+                for j in 0..MIX_NUM {
+                    if i != j {
+                        v.push(genes[i].mix(&genes[j]));
+                    }
+                }
+            }
+            v
+        };
+        // top n の mutate
+        let mut_genes = {
+            let mut v = vec![];
+            for i in 0..MUT_NUM {
+                for _ in 0..MUT_CPY {
+                    let mut g = genes[i].clone();
+                    g.mutate(MUT_MUCH);
+                    v.push(g);
+                }
+            }
+            v
+        };
+
+        for _ in 0..mix_genes.len() {
+            genes.pop();
+        }
+
+        for _ in 0..mut_genes.len() {
+            genes.pop();
+        }
+
+        genes.extend(mix_genes);
+        genes.extend(mut_genes);
+        OneGame::from_gene(genes)
+    }
+}
+
+fn nice_gene(
+    OneGame {
+        remain,
+        field,
+        chans,
+    }: &OneGame,
+) -> Vec<Gene> {
+    let mut gene_order: Vec<_> = chans
+        .iter()
+        .map(|result| match result {
+            Ok(chan) => ((0, chan.hp), chan.act.clone()),
+            Err((order, gene)) => ((1, *order), gene.clone()),
+        })
+        .collect();
+    gene_order.sort_by_key(|(o, g)| *o);
+    gene_order.into_iter().map(|(o, g)| g).collect()
+}
+
+fn train() -> OneGame {
+    log("start");
+    let mut game = OneGame::new();
+    'a: for i in 0..TRAIN_NUM {
+        log(format!("train {i}"));
+        for _ in 0..TRAIN_STEPMAX {
+            game.step();
+            if game.is_end() {
+                game = game.end();
+                continue 'a;
+            }
+        }
+        break 'a;
+    }
+    game.end()
 }
 
 impl OneGame {
@@ -277,27 +364,6 @@ impl OneGame {
             }
         }
     }
-}
-
-fn nice_gene(
-    OneGame {
-        remain,
-        field,
-        chans,
-    }: &OneGame,
-) -> Vec<Gene> {
-    let mut gene_order: Vec<_> = chans
-        .iter()
-        .filter_map(|result| {
-            if let Err(order) = result {
-                Some(order.clone())
-            } else {
-                None
-            }
-        })
-        .collect();
-    gene_order.sort_by_key(|(o, g)| *o);
-    gene_order.into_iter().map(|(o, g)| g).collect()
 }
 
 const LEN: usize = 5;
@@ -384,12 +450,12 @@ impl Component for App {
         let callback = ctx.link().callback(|_| Msg::Tick);
         let interval = Interval::new(10, move || callback.emit(()));
         Self {
-            game: OneGame::new(),
+            game: train(),
             interval,
         }
     }
     fn view(&self, ctx: &Context<Self>) -> Html {
-        if self.game.remain == 0 {
+        if self.game.is_end() {
             ctx.link().send_message(Msg::End);
         }
         onegame_view(&self.game)
@@ -401,44 +467,7 @@ impl Component for App {
                 true
             }
             Msg::End => {
-                let mut genes = nice_gene(&self.game);
-                // top n の mix
-                let mix_genes = {
-                    let mut v = vec![];
-                    for i in 0..MIX_NUM {
-                        for j in 0..MIX_NUM {
-                            if i != j {
-                                v.push(genes[i].mix(&genes[j]));
-                            }
-                        }
-                    }
-                    v
-                };
-                // top n の mutate
-                let mut_genes = {
-                    let mut v = vec![];
-                    for i in 0..MUT_NUM {
-                        for _ in 0..MUT_CPY {
-                            let mut g = genes[i].clone();
-                            g.mutate(MUT_MUCH);
-                            v.push(g);
-                        }
-                    }
-                    v
-                };
-
-                for _ in 0..mix_genes.len() {
-                    genes.pop();
-                }
-
-                for _ in 0..mut_genes.len() {
-                    genes.pop();
-                }
-
-                genes.extend(mix_genes);
-                genes.extend(mut_genes);
-
-                self.game = OneGame::from_gene(genes);
+                self.game = self.game.end();
                 true
             }
         }

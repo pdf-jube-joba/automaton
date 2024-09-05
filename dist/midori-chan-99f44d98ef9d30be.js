@@ -501,6 +501,9 @@ function __wbg_get_imports() {
     imports.wbg.__wbg_setAttribute_d5540a19be09f8dc = function() { return handleError(function (arg0, arg1, arg2, arg3, arg4) {
         getObject(arg0).setAttribute(getStringFromWasm0(arg1, arg2), getStringFromWasm0(arg3, arg4));
     }, arguments) };
+    imports.wbg.__wbg_log_b103404cc5920657 = function(arg0) {
+        console.log(getObject(arg0));
+    };
     imports.wbg.__wbg_instanceof_ShadowRoot_72d8e783f8e0093c = function(arg0) {
         let result;
         try {
@@ -704,15 +707,15 @@ function __wbg_get_imports() {
         const ret = wasm.memory;
         return addHeapObject(ret);
     };
-    imports.wbg.__wbindgen_closure_wrapper2258 = function(arg0, arg1, arg2) {
-        const ret = makeClosure(arg0, arg1, 163, __wbg_adapter_24);
+    imports.wbg.__wbindgen_closure_wrapper2277 = function(arg0, arg1, arg2) {
+        const ret = makeClosure(arg0, arg1, 164, __wbg_adapter_24);
         return addHeapObject(ret);
     };
-    imports.wbg.__wbindgen_closure_wrapper3710 = function(arg0, arg1, arg2) {
+    imports.wbg.__wbindgen_closure_wrapper3729 = function(arg0, arg1, arg2) {
         const ret = makeMutClosure(arg0, arg1, 256, __wbg_adapter_27);
         return addHeapObject(ret);
     };
-    imports.wbg.__wbindgen_closure_wrapper3740 = function(arg0, arg1, arg2) {
+    imports.wbg.__wbindgen_closure_wrapper3759 = function(arg0, arg1, arg2) {
         const ret = makeMutClosure(arg0, arg1, 264, __wbg_adapter_30);
         return addHeapObject(ret);
     };
@@ -767,7 +770,7 @@ async function __wbg_init(module_or_path) {
     console.warn('using deprecated parameters for the initialization function; pass a single object instead')
 
     if (typeof module_or_path === 'undefined') {
-        module_or_path = new URL('midori-chan-912e12544d3e4460_bg.wasm', import.meta.url);
+        module_or_path = new URL('midori-chan-99f44d98ef9d30be_bg.wasm', import.meta.url);
     }
     const imports = __wbg_get_imports();
 
