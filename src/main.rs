@@ -415,7 +415,7 @@ fn chan_view(
 
 #[derive(Debug)]
 struct App {
-    genes: Vec<Gene>,
+    genes_json: serde_json::Value,
     game: OneGame,
     #[allow(dead_code)]
     interval: Interval,
@@ -425,7 +425,7 @@ struct App {
 enum Msg {
     Tick,
     End,
-    Read(Vec<Gene>),
+    Read(serde_json::Value),
 }
 
 #[derive(Debug, Clone, PartialEq, Properties)]
@@ -443,7 +443,7 @@ impl Component for App {
         let mut rng = thread_rng();
         let game = OneGame::from_gene(genes.to_vec(), &mut rng);
         Self {
-            genes: genes.to_owned(),
+            genes_json: serde_json::to_value(genes).unwrap(),
             game: game.clone(),
             interval,
             num: 0,
@@ -453,18 +453,11 @@ impl Component for App {
         if self.game.is_end() {
             ctx.link().send_message(Msg::End);
         }
-        let json_value = {
-            let genes = self.game.get_genes_ordered();
-            serde_json::to_value(genes).unwrap()
-        };
-        let on_drop_json = ctx.link().callback(|json_value: serde_json::Value| {
-            let genes: Vec<Gene> = serde_json::from_value(json_value).unwrap();
-            Msg::Read(genes)
-        });
+        let on_drop_json = ctx.link().callback(Msg::Read);
         html! {
             <>
             <JsonFileReadView on_drop_json={on_drop_json} />
-            <JsonFileSaveView json_value={json_value} />
+            <JsonFileSaveView json_value={self.genes_json.clone()} />
             <br/>
             {onegame_view(&self.game)}
             </>
@@ -480,12 +473,13 @@ impl Component for App {
                 let genes = self.game.get_genes_ordered();
                 let new_genes = traint_from_gene(genes, TRAIN_B, &mut rng);
                 self.game = OneGame::from_gene(new_genes, &mut rng);
+                log(format!("{}", self.num));
                 self.num += 1;
             }
             Msg::Read(genes) => {
                 let mut rng = thread_rng();
-                self.genes.clone_from(&genes);
-                self.game = OneGame::from_gene(genes, &mut rng);
+                self.genes_json.clone_from(&genes);
+                self.game = OneGame::from_gene(serde_json::from_value(genes).unwrap(), &mut rng);
                 self.num = 0;
             }
         }
