@@ -1,12 +1,15 @@
+use anyhow::bail;
+use gloo::file::callbacks::FileReader;
 use gloo::timers::callback::Interval;
 use rand::prelude::*;
+use serde::Serialize;
 use wasm_bindgen::JsValue;
 use yew::prelude::*;
 
 // なんか一気にlogが描画されるせいでちゃんと動いてるのかわかりにくい。
 fn main() {
     let mut rng = thread_rng();
-    let genes = train(&mut rng);
+    let genes = (0..CHAN_NUM).map(|_| Gene::random(&mut rng)).collect();
     let document = gloo::utils::document();
     let target_element = document.get_element_by_id("onthis").unwrap();
     yew::Renderer::<App>::with_root_and_props(target_element, StartAppGame { genes }).render();
@@ -88,16 +91,18 @@ enum Ori {
 
 const MOVE_NUM: usize = 2_usize.pow((3 * 3) as u32 - 1) * (2_usize.pow(8));
 
-#[derive(Debug, Clone, PartialEq)]
-struct Gene {
-    gene: [Action; MOVE_NUM],
-}
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+struct Gene(Vec<Action>);
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 enum Action {
+    #[serde(rename = "F")]
     Forword,
+    #[serde(rename = "B")]
     Back,
+    #[serde(rename = "R")]
     TurnRight,
+    #[serde(rename = "L")]
     TurnLeft,
 }
 
@@ -116,21 +121,20 @@ impl Gene {
                 }
             }
         }
-        &self.gene[index as usize]
+        &self.0[index as usize]
     }
 
     fn random(rng: &mut ThreadRng) -> Self {
-        let mut gene = [Action::Forword; MOVE_NUM];
-        for gene_i in gene.iter_mut() {
-            *gene_i = match rng.gen_range(0..4) {
+        let gene = (0..MOVE_NUM)
+            .map(|_| match rng.gen_range(0..4) {
                 0 => Action::Forword,
                 1 => Action::Back,
                 2 => Action::TurnLeft,
                 3 => Action::TurnRight,
                 _ => unreachable!(),
-            };
-        }
-        Self { gene }
+            })
+            .collect();
+        Self(gene)
     }
 
     fn mutate(&mut self, num: usize, rng: &mut ThreadRng) {
@@ -143,14 +147,14 @@ impl Gene {
                 3 => Action::TurnRight,
                 _ => unreachable!(),
             };
-            self.gene[i] = o;
+            self.0[i] = o;
         }
     }
 
     fn mix(&mut self, other: &Self, rng: &mut ThreadRng) {
         for i in 0..MOVE_NUM {
             if rng.gen_bool(0.5) {
-                self.gene[i] = other.gene[i];
+                self.0[i] = other.0[i];
             }
         }
     }
@@ -411,14 +415,17 @@ fn chan_view(
 
 #[derive(Debug)]
 struct App {
+    genes: Vec<Gene>,
     game: OneGame,
     #[allow(dead_code)]
     interval: Interval,
+    num: usize,
 }
 
 enum Msg {
     Tick,
     End,
+    Read(Vec<Gene>),
 }
 
 #[derive(Debug, Clone, PartialEq, Properties)]
@@ -436,27 +443,153 @@ impl Component for App {
         let mut rng = thread_rng();
         let game = OneGame::from_gene(genes.to_vec(), &mut rng);
         Self {
+            genes: genes.to_owned(),
             game: game.clone(),
             interval,
+            num: 0,
         }
     }
     fn view(&self, ctx: &Context<Self>) -> Html {
         if self.game.is_end() {
             ctx.link().send_message(Msg::End);
         }
-        onegame_view(&self.game)
+        let json_value = {
+            let genes = self.game.get_genes_ordered();
+            serde_json::to_value(genes).unwrap()
+        };
+        let on_drop_json = ctx.link().callback(|json_value: serde_json::Value| {
+            let genes: Vec<Gene> = serde_json::from_value(json_value).unwrap();
+            Msg::Read(genes)
+        });
+        html! {
+            <>
+            <JsonFileReadView on_drop_json={on_drop_json} />
+            <JsonFileSaveView json_value={json_value} />
+            <br/>
+            {onegame_view(&self.game)}
+            </>
+        }
     }
     fn update(&mut self, _ctx: &Context<Self>, msg: Self::Message) -> bool {
         match msg {
             Msg::Tick => {
                 self.game.step();
-                true
             }
             Msg::End => {
                 let mut rng = thread_rng();
                 let genes = self.game.get_genes_ordered();
                 let new_genes = traint_from_gene(genes, TRAIN_B, &mut rng);
                 self.game = OneGame::from_gene(new_genes, &mut rng);
+                self.num += 1;
+            }
+            Msg::Read(genes) => {
+                let mut rng = thread_rng();
+                self.genes.clone_from(&genes);
+                self.game = OneGame::from_gene(genes, &mut rng);
+                self.num = 0;
+            }
+        }
+        true
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Properties)]
+pub struct JsonFileSaveProps {
+    pub json_value: serde_json::Value,
+}
+
+#[function_component(JsonFileSaveView)]
+pub fn json_file_save_view(JsonFileSaveProps { json_value }: &JsonFileSaveProps) -> Html {
+    let head_string = "data:text/json;charset=utf-8,";
+    let data = json_value.to_string();
+    html! {
+        <a href={format!("{}{}", head_string, data)} download="data.json"> {"save as json"}</a>
+    }
+}
+
+pub enum JsonFileReadMsg {
+    Read(DragEvent),
+    LoadEnd(Result<String, anyhow::Error>),
+}
+
+#[derive(Debug, Clone, PartialEq, Properties)]
+pub struct JsonFileReadProps {
+    pub on_drop_json: Callback<serde_json::Value>,
+}
+
+#[derive(Debug, Default)]
+pub struct JsonFileReadView {
+    reader: Option<FileReader>,
+}
+
+impl Component for JsonFileReadView {
+    type Message = JsonFileReadMsg;
+    type Properties = JsonFileReadProps;
+    fn create(_ctx: &Context<Self>) -> Self {
+        Self::default()
+    }
+    fn view(&self, ctx: &Context<Self>) -> Html {
+        html! {
+            <>
+            <div id="drop-container"
+                ondrop={ctx.link().callback(|event: DragEvent|{
+                    event.prevent_default();
+                    JsonFileReadMsg::Read(event)
+                })}
+                ondragover={Callback::from(|event: DragEvent| {
+                    event.prevent_default();
+                })}
+                ondragenter={Callback::from(|event: DragEvent| {
+                    event.prevent_default();
+                })}
+            > <p> {"drop here"} </p> </div>
+            </>
+        }
+    }
+    fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
+        match msg {
+            JsonFileReadMsg::Read(dragevent) => {
+                let read = move |event: DragEvent| -> Result<FileReader, anyhow::Error> {
+                    let Some(data_transfer) = event.data_transfer() else {
+                        bail!("data transfer fail")
+                    };
+                    let Some(files) = data_transfer.files() else {
+                        bail!("files fail")
+                    };
+                    let Some(file) = files.get(0) else {
+                        bail!("file fail")
+                    };
+                    let file: gloo::file::File = file.into();
+                    let link = ctx.link().clone();
+                    let task = gloo::file::callbacks::read_as_text(&file, move |res| {
+                        link.send_message(JsonFileReadMsg::LoadEnd(res.map_err(|e| e.into())))
+                    });
+                    Ok(task)
+                };
+                match read(dragevent) {
+                    Ok(task) => {
+                        self.reader = Some(task);
+                    }
+                    Err(err) => {
+                        log(format!("{err:?}"));
+                    }
+                }
+                true
+            }
+            JsonFileReadMsg::LoadEnd(res) => {
+                match res {
+                    Ok(string) => match serde_json::from_str(&string) {
+                        Ok(val) => {
+                            ctx.props().on_drop_json.emit(val);
+                        }
+                        Err(err) => {
+                            log(format!("{err:?}"));
+                        }
+                    },
+                    Err(err) => {
+                        log(format!("{err:?}"));
+                    }
+                }
                 true
             }
         }
