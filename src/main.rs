@@ -413,6 +413,155 @@ fn chan_view(
     )
 }
 
+struct StartScene {}
+
+#[derive(Debug, Clone, PartialEq, Properties)]
+struct StartSceneProps {}
+
+enum StartSceneMsg {
+    Random,
+    Read(serde_json::Value),
+}
+
+impl Component for StartScene {
+    type Message = StartSceneMsg;
+    type Properties = StartSceneProps;
+    fn create(ctx: &Context<Self>) -> Self {
+        Self {}
+    }
+    fn view(&self, ctx: &Context<Self>) -> Html {
+        let on_ramdom = ctx.link().callback(|_: MouseEvent| StartSceneMsg::Random);
+        let on_drop_json = ctx.link().callback(StartSceneMsg::Read);
+        html! {
+            <>
+            <button onclick={on_ramdom}> {"random"} </button>
+            <JsonFileReadView on_drop_json={on_drop_json} />
+            </>
+        }
+    }
+}
+
+struct GameWatchScene {
+    json_gene: serde_json::Value,
+    game: OneGame,
+    interval: Interval,
+}
+
+#[derive(Debug, Clone, PartialEq, Properties)]
+struct GameWatchProps {
+    genes: Vec<Gene>,
+    on_end: Callback<()>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum GameWatchMsg {
+    Tick,
+}
+
+impl Component for GameWatchScene {
+    type Message = GameWatchMsg;
+    type Properties = GameWatchProps;
+    fn create(ctx: &Context<Self>) -> Self {
+        let GameWatchProps { genes, on_end: _ } = ctx.props();
+        let callback = ctx.link().callback(|_| GameWatchMsg::Tick);
+        let interval = Interval::new(10, move || callback.emit(()));
+        let mut rng = thread_rng();
+        let game = OneGame::from_gene(genes.to_vec(), &mut rng);
+        let json_gene = serde_json::to_value(genes).unwrap();
+        Self {
+            json_gene,
+            game,
+            interval,
+        }
+    }
+    fn view(&self, _ctx: &Context<Self>) -> Html {
+        html! {
+            <>
+            {onegame_view(&self.game)}
+            <JsonFileSaveView json_value={self.json_gene.clone()} />
+            </>
+        }
+    }
+    fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
+        match msg {
+            GameWatchMsg::Tick => {
+                self.game.step();
+                if self.game.is_end() {
+                    let GameWatchProps { genes: _, on_end } = ctx.props();
+                    on_end.emit(());
+                }
+                true
+            }
+        }
+    }
+}
+
+struct TrainScene {
+    genes: Vec<Gene>,
+    num: usize,
+    interval: Interval,
+}
+
+#[derive(Debug, Clone, PartialEq, Properties)]
+struct TrainProps {
+    start_genes: Vec<Gene>,
+    on_train_end: Callback<Vec<Gene>>,
+    train_num: usize,
+}
+
+enum TrainMsg {
+    TrainStart,
+}
+
+impl Component for TrainScene {
+    type Message = TrainMsg;
+    type Properties = TrainProps;
+    fn create(ctx: &Context<Self>) -> Self {
+        let callback = ctx.link().callback(|_| TrainMsg::TrainStart);
+        let interval = Interval::new(10, move || callback.emit(()));
+        let TrainProps {
+            start_genes,
+            on_train_end,
+            train_num,
+        } = ctx.props();
+        Self {
+            genes: start_genes.clone(),
+            num: 0,
+            interval,
+        }
+    }
+    fn view(&self, ctx: &Context<Self>) -> Html {
+        let TrainProps {
+            start_genes,
+            on_train_end,
+            train_num,
+        } = ctx.props();
+        html! {
+            <>
+            {self.num} {"/"} {train_num}
+            </>
+        }
+    }
+    fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
+        match msg {
+            TrainMsg::TrainStart => {
+                let mut rng = thread_rng();
+                self.genes = traint_from_gene(self.genes.clone(), 0, &mut rng);
+                self.num += 1;
+                let TrainProps {
+                    start_genes,
+                    on_train_end,
+                    train_num,
+                } = ctx.props();
+                if self.num == *train_num {
+                    on_train_end.emit(self.genes.clone())
+                }
+                true
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 struct App {
     genes_json: serde_json::Value,
