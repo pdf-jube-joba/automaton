@@ -630,7 +630,7 @@ impl Component for App {
                     <TrainScene
                         start_genes={self.genes.clone()}
                         on_train_end={on_train_end}
-                        train_num={10}
+                        train_num={30}
                     />
                 }
             }
