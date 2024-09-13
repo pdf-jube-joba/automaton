@@ -491,7 +491,6 @@ impl Component for GameWatchScene {
         html! {
             <>
             {onegame_view(&self.game)}
-            <JsonFileSaveView json_value={self.json_gene.clone()} />
             </>
         }
     }
@@ -510,6 +509,7 @@ impl Component for GameWatchScene {
 }
 
 struct TrainScene {
+    start_genes: serde_json::Value,
     genes: Vec<Gene>,
     num: usize,
     interval: Interval,
@@ -537,7 +537,9 @@ impl Component for TrainScene {
             on_train_end,
             train_num,
         } = ctx.props();
+        let json = serde_json::to_value(start_genes).unwrap();
         Self {
+            start_genes: json,
             genes: start_genes.clone(),
             num: 0,
             interval,
@@ -552,6 +554,7 @@ impl Component for TrainScene {
         html! {
             <>
             {self.num} {"/"} {train_num}
+            <JsonFileSaveView json_value={self.start_genes.clone()} />
             </>
         }
     }
