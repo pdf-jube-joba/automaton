@@ -8,11 +8,9 @@ use yew::prelude::*;
 
 // なんか一気にlogが描画されるせいでちゃんと動いてるのかわかりにくい。
 fn main() {
-    let mut rng = thread_rng();
-    let genes = (0..CHAN_NUM).map(|_| Gene::random(&mut rng)).collect();
     let document = gloo::utils::document();
     let target_element = document.get_element_by_id("onthis").unwrap();
-    yew::Renderer::<App>::with_root_and_props(target_element, StartAppGame { genes }).render();
+    yew::Renderer::<App>::with_root_and_props(target_element, ()).render();
 }
 
 const W: usize = 200;
@@ -416,7 +414,9 @@ fn chan_view(
 struct StartScene {}
 
 #[derive(Debug, Clone, PartialEq, Properties)]
-struct StartSceneProps {}
+struct StartSceneProps {
+    on_choose: Callback<Option<Vec<Gene>>>,
+}
 
 enum StartSceneMsg {
     Random,
@@ -438,6 +438,19 @@ impl Component for StartScene {
             <JsonFileReadView on_drop_json={on_drop_json} />
             </>
         }
+    }
+    fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
+        let StartSceneProps { on_choose } = ctx.props();
+        match msg {
+            StartSceneMsg::Random => {
+                on_choose.emit(None);
+            }
+            StartSceneMsg::Read(genes) => {
+                let genes = serde_json::from_value(genes).unwrap();
+                on_choose.emit(Some(genes));
+            }
+        }
+        true
     }
 }
 
@@ -563,73 +576,77 @@ impl Component for TrainScene {
 }
 
 #[derive(Debug)]
+enum Scene {
+    Start,
+    Game,
+    Train,
+}
+
+#[derive(Debug)]
 struct App {
-    genes_json: serde_json::Value,
-    game: OneGame,
-    #[allow(dead_code)]
-    interval: Interval,
+    genes: Vec<Gene>,
     num: usize,
+    scene: Scene,
 }
 
 enum Msg {
-    Tick,
-    End,
-    Read(serde_json::Value),
-}
-
-#[derive(Debug, Clone, PartialEq, Properties)]
-struct StartAppGame {
-    genes: Vec<Gene>,
+    Start(Option<Vec<Gene>>),
+    GameEnd,
+    TrainEnd(Vec<Gene>),
 }
 
 impl Component for App {
     type Message = Msg;
-    type Properties = StartAppGame;
+    type Properties = ();
     fn create(ctx: &Context<Self>) -> Self {
-        let callback = ctx.link().callback(|_| Msg::Tick);
-        let interval = Interval::new(10, move || callback.emit(()));
-        let StartAppGame { genes } = ctx.props();
         let mut rng = thread_rng();
-        let game = OneGame::from_gene(genes.to_vec(), &mut rng);
+        let genes = (0..CHAN_NUM).map(|_| Gene::random(&mut rng)).collect();
         Self {
-            genes_json: serde_json::to_value(genes).unwrap(),
-            game: game.clone(),
-            interval,
+            genes,
             num: 0,
+            scene: Scene::Start,
         }
     }
     fn view(&self, ctx: &Context<Self>) -> Html {
-        if self.game.is_end() {
-            ctx.link().send_message(Msg::End);
-        }
-        let on_drop_json = ctx.link().callback(Msg::Read);
-        html! {
-            <>
-            <JsonFileReadView on_drop_json={on_drop_json} />
-            <JsonFileSaveView json_value={self.genes_json.clone()} />
-            <br/>
-            {onegame_view(&self.game)}
-            </>
+        match self.scene {
+            Scene::Start => {
+                let on_choose = ctx.link().callback(Msg::Start);
+                html! {
+                    <StartScene on_choose={on_choose}/>
+                }
+            }
+            Scene::Game => {
+                let on_end = ctx.link().callback(|_| Msg::GameEnd);
+                html! {
+                    <GameWatchScene genes={self.genes.clone()} on_end={on_end}/>
+                }
+            }
+            Scene::Train => {
+                let on_train_end = ctx.link().callback(Msg::TrainEnd);
+                html! {
+                    <TrainScene
+                        start_genes={self.genes.clone()}
+                        on_train_end={on_train_end}
+                        train_num={10}
+                    />
+                }
+            }
         }
     }
     fn update(&mut self, _ctx: &Context<Self>, msg: Self::Message) -> bool {
         match msg {
-            Msg::Tick => {
-                self.game.step();
+            Msg::Start(genes) => {
+                if let Some(genes) = genes {
+                    self.genes = genes;
+                }
+                self.scene = Scene::Game;
             }
-            Msg::End => {
-                let mut rng = thread_rng();
-                let genes = self.game.get_genes_ordered();
-                let new_genes = traint_from_gene(genes, TRAIN_B, &mut rng);
-                self.game = OneGame::from_gene(new_genes, &mut rng);
-                log(format!("{}", self.num));
-                self.num += 1;
+            Msg::GameEnd => {
+                self.scene = Scene::Train;
             }
-            Msg::Read(genes) => {
-                let mut rng = thread_rng();
-                self.genes_json.clone_from(&genes);
-                self.game = OneGame::from_gene(serde_json::from_value(genes).unwrap(), &mut rng);
-                self.num = 0;
+            Msg::TrainEnd(genes) => {
+                self.genes = genes;
+                self.scene = Scene::Game;
             }
         }
         true
