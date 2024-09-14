@@ -497,19 +497,10 @@ struct GameWatchScene {
     interval: Interval,
 }
 
-#[derive(Debug, Clone, Properties)]
+#[derive(Debug, Clone, PartialEq, Properties)]
 struct GameWatchProps {
     genes: Vec<Gene>,
     on_end: Callback<()>,
-    rng: Rc<RefCell<ThreadRng>>,
-}
-
-impl PartialEq for GameWatchProps {
-    fn eq(&self, other: &Self) -> bool {
-        self.genes == other.genes
-            && self.on_end == other.on_end
-            && Rc::ptr_eq(&self.rng, &other.rng)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -521,14 +512,11 @@ impl Component for GameWatchScene {
     type Message = GameWatchMsg;
     type Properties = GameWatchProps;
     fn create(ctx: &Context<Self>) -> Self {
-        let GameWatchProps {
-            genes,
-            on_end: _,
-            rng,
-        } = ctx.props();
+        let GameWatchProps { genes, on_end: _ } = ctx.props();
+        let mut rng = thread_rng();
         let callback = ctx.link().callback(|_| GameWatchMsg::Tick);
         let interval = Interval::new(10, move || callback.emit(()));
-        let game = OneGame::from_gene(genes.to_vec(), rng.deref().borrow_mut().deref_mut());
+        let game = OneGame::from_gene(genes.to_vec(), &mut rng);
         let json_gene = serde_json::to_value(genes).unwrap();
         Self {
             json_gene,
@@ -548,11 +536,7 @@ impl Component for GameWatchScene {
             GameWatchMsg::Tick => {
                 self.game.step();
                 if self.game.is_end() {
-                    let GameWatchProps {
-                        genes: _,
-                        on_end,
-                        rng,
-                    } = ctx.props();
+                    let GameWatchProps { genes: _, on_end } = ctx.props();
                     on_end.emit(());
                 }
                 true
@@ -568,21 +552,11 @@ struct TrainScene {
     interval: Interval,
 }
 
-#[derive(Debug, Clone, Properties)]
+#[derive(Debug, Clone, PartialEq, Properties)]
 struct TrainProps {
     start_genes: Vec<Gene>,
     on_train_end: Callback<Vec<Gene>>,
     train_num: usize,
-    rng: Rc<RefCell<ThreadRng>>,
-}
-
-impl PartialEq for TrainProps {
-    fn eq(&self, other: &Self) -> bool {
-        self.start_genes == other.start_genes
-            && self.on_train_end == other.on_train_end
-            && self.train_num == other.train_num
-            && Rc::ptr_eq(&self.rng, &other.rng)
-    }
 }
 
 enum TrainMsg {
@@ -599,7 +573,6 @@ impl Component for TrainScene {
             start_genes,
             on_train_end,
             train_num,
-            rng,
         } = ctx.props();
         let json = serde_json::to_value(start_genes).unwrap();
         Self {
@@ -614,7 +587,6 @@ impl Component for TrainScene {
             start_genes,
             on_train_end,
             train_num,
-            rng,
         } = ctx.props();
         html! {
             <>
@@ -630,10 +602,9 @@ impl Component for TrainScene {
                     start_genes,
                     on_train_end,
                     train_num,
-                    rng,
                 } = ctx.props();
-                self.genes =
-                    traint_from_gene(self.genes.clone(), 0, rng.deref().borrow_mut().deref_mut());
+                let mut rng = thread_rng();
+                self.genes = traint_from_gene(self.genes.clone(), 0, &mut rng);
                 self.num += 1;
                 if self.num == *train_num {
                     on_train_end.emit(self.genes.clone())
@@ -656,7 +627,6 @@ struct App {
     genes: Vec<Gene>,
     num: usize,
     scene: Scene,
-    rng: Rc<RefCell<ThreadRng>>,
 }
 
 enum Msg {
@@ -675,7 +645,6 @@ impl Component for App {
             genes,
             num: 0,
             scene: Scene::Start,
-            rng: Rc::new(RefCell::new(rng)),
         }
     }
     fn view(&self, ctx: &Context<Self>) -> Html {
@@ -692,7 +661,6 @@ impl Component for App {
                     <GameWatchScene
                         genes={self.genes.clone()}
                         on_end={on_end}
-                        rng={self.rng.clone()}
                     />
                 }
             }
@@ -702,8 +670,7 @@ impl Component for App {
                     <TrainScene
                         start_genes={self.genes.clone()}
                         on_train_end={on_train_end}
-                        train_num={30}
-                        rng={self.rng.clone()}
+                        train_num={50}
                     />
                 }
             }
@@ -714,8 +681,10 @@ impl Component for App {
             Msg::Start(genes) => {
                 if let Some(genes) = genes {
                     self.genes = genes;
+                    self.scene = Scene::Game;
+                } else {
+                    self.scene = Scene::Train;
                 }
-                self.scene = Scene::Game;
             }
             Msg::GameEnd => {
                 self.scene = Scene::Train;
