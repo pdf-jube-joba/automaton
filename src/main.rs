@@ -3,6 +3,10 @@ use gloo::file::callbacks::FileReader;
 use gloo::timers::callback::Interval;
 use rand::prelude::*;
 use serde::Serialize;
+use std::borrow::BorrowMut;
+use std::cell::RefCell;
+use std::ops::{Deref, DerefMut};
+use std::rc::Rc;
 use wasm_bindgen::JsValue;
 use yew::prelude::*;
 
@@ -44,11 +48,14 @@ struct Field {
 }
 
 impl Field {
-    fn random(rng: &mut ThreadRng) -> Self {
+    fn random<T>(rng: &mut T) -> Self
+    where
+        T: BorrowMut<ThreadRng>,
+    {
         let mut field = [[false; W]; H];
         for row in field.iter_mut() {
             for item in row {
-                if rng.gen_bool(P_FOOD) {
+                if rng.borrow_mut().gen_bool(P_FOOD) {
                     *item = true;
                 }
             }
@@ -67,8 +74,14 @@ struct Chan {
 }
 
 impl Chan {
-    fn spawn(gene: Gene, rng: &mut ThreadRng) -> Self {
-        let pos = (rng.gen_range(0..H), rng.gen_range(0..W));
+    fn spawn<T>(gene: Gene, rng: &mut T) -> Self
+    where
+        T: BorrowMut<ThreadRng>,
+    {
+        let pos = (
+            rng.borrow_mut().gen_range(0..H),
+            rng.borrow_mut().gen_range(0..W),
+        );
         Chan {
             pos,
             hp: MAXHP,
@@ -122,9 +135,12 @@ impl Gene {
         &self.0[index as usize]
     }
 
-    fn random(rng: &mut ThreadRng) -> Self {
+    fn random<T>(rng: &mut T) -> Self
+    where
+        T: BorrowMut<ThreadRng>,
+    {
         let gene = (0..MOVE_NUM)
-            .map(|_| match rng.gen_range(0..4) {
+            .map(|_| match rng.borrow_mut().gen_range(0..4) {
                 0 => Action::Forword,
                 1 => Action::Back,
                 2 => Action::TurnLeft,
@@ -135,10 +151,13 @@ impl Gene {
         Self(gene)
     }
 
-    fn mutate(&mut self, num: usize, rng: &mut ThreadRng) {
+    fn mutate<T>(&mut self, num: usize, rng: &mut T)
+    where
+        T: BorrowMut<ThreadRng>,
+    {
         for _ in 0..num {
-            let i = rng.gen_range(0..MOVE_NUM);
-            let o = match rng.gen_range(0..4) {
+            let i = rng.borrow_mut().gen_range(0..MOVE_NUM);
+            let o = match rng.borrow_mut().gen_range(0..4) {
                 0 => Action::Forword,
                 1 => Action::Back,
                 2 => Action::TurnLeft,
@@ -149,9 +168,12 @@ impl Gene {
         }
     }
 
-    fn mix(&mut self, other: &Self, rng: &mut ThreadRng) {
+    fn mix<T>(&mut self, other: &Self, rng: &mut T)
+    where
+        T: BorrowMut<ThreadRng>,
+    {
         for i in 0..MOVE_NUM {
-            if rng.gen_bool(0.5) {
+            if rng.borrow_mut().gen_bool(0.5) {
                 self.0[i] = other.0[i];
             }
         }
@@ -181,7 +203,10 @@ struct OneGame {
 }
 
 impl OneGame {
-    fn random(rng: &mut ThreadRng) -> Self {
+    fn random<T>(rng: &mut T) -> Self
+    where
+        T: BorrowMut<ThreadRng>,
+    {
         let field = Field::random(rng);
         // log("A");
         let chans = (0..CHAN_NUM)
@@ -194,7 +219,10 @@ impl OneGame {
             chans,
         }
     }
-    fn from_gene(genes: Vec<Gene>, rng: &mut ThreadRng) -> Self {
+    fn from_gene<T>(genes: Vec<Gene>, rng: &mut T) -> Self
+    where
+        T: BorrowMut<ThreadRng>,
+    {
         assert_eq!(genes.len(), CHAN_NUM);
         let field = Field::random(rng);
         let chans = genes
@@ -231,7 +259,10 @@ impl OneGame {
     }
 }
 
-fn next_gene(genes: Vec<Gene>, rng: &mut ThreadRng) -> Vec<Gene> {
+fn next_gene<T>(genes: Vec<Gene>, rng: &mut T) -> Vec<Gene>
+where
+    T: BorrowMut<ThreadRng>,
+{
     let mut new_genes = Vec::with_capacity(genes.len());
 
     // top n の mix
@@ -258,7 +289,10 @@ fn next_gene(genes: Vec<Gene>, rng: &mut ThreadRng) -> Vec<Gene> {
     new_genes
 }
 
-fn train(rng: &mut ThreadRng) -> Vec<Gene> {
+fn train<T>(rng: &mut T) -> Vec<Gene>
+where
+    T: BorrowMut<ThreadRng>,
+{
     // log("start");
     let mut game = OneGame::random(rng);
     'a: for i in 0..TRAIN_NUM {
@@ -275,7 +309,10 @@ fn train(rng: &mut ThreadRng) -> Vec<Gene> {
     game.get_genes_ordered()
 }
 
-fn traint_from_gene(genes: Vec<Gene>, num: usize, rng: &mut ThreadRng) -> Vec<Gene> {
+fn traint_from_gene<T>(genes: Vec<Gene>, num: usize, rng: &mut T) -> Vec<Gene>
+where
+    T: BorrowMut<ThreadRng>,
+{
     let mut game = OneGame::from_gene(genes, rng);
     'a: for i in 0..num {
         // log(format!("train {i}"));
@@ -460,10 +497,19 @@ struct GameWatchScene {
     interval: Interval,
 }
 
-#[derive(Debug, Clone, PartialEq, Properties)]
+#[derive(Debug, Clone, Properties)]
 struct GameWatchProps {
     genes: Vec<Gene>,
     on_end: Callback<()>,
+    rng: Rc<RefCell<ThreadRng>>,
+}
+
+impl PartialEq for GameWatchProps {
+    fn eq(&self, other: &Self) -> bool {
+        self.genes == other.genes
+            && self.on_end == other.on_end
+            && Rc::ptr_eq(&self.rng, &other.rng)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -475,11 +521,14 @@ impl Component for GameWatchScene {
     type Message = GameWatchMsg;
     type Properties = GameWatchProps;
     fn create(ctx: &Context<Self>) -> Self {
-        let GameWatchProps { genes, on_end: _ } = ctx.props();
+        let GameWatchProps {
+            genes,
+            on_end: _,
+            rng,
+        } = ctx.props();
         let callback = ctx.link().callback(|_| GameWatchMsg::Tick);
         let interval = Interval::new(10, move || callback.emit(()));
-        let mut rng = thread_rng();
-        let game = OneGame::from_gene(genes.to_vec(), &mut rng);
+        let game = OneGame::from_gene(genes.to_vec(), rng.deref().borrow_mut().deref_mut());
         let json_gene = serde_json::to_value(genes).unwrap();
         Self {
             json_gene,
@@ -499,7 +548,11 @@ impl Component for GameWatchScene {
             GameWatchMsg::Tick => {
                 self.game.step();
                 if self.game.is_end() {
-                    let GameWatchProps { genes: _, on_end } = ctx.props();
+                    let GameWatchProps {
+                        genes: _,
+                        on_end,
+                        rng,
+                    } = ctx.props();
                     on_end.emit(());
                 }
                 true
@@ -515,11 +568,21 @@ struct TrainScene {
     interval: Interval,
 }
 
-#[derive(Debug, Clone, PartialEq, Properties)]
+#[derive(Debug, Clone, Properties)]
 struct TrainProps {
     start_genes: Vec<Gene>,
     on_train_end: Callback<Vec<Gene>>,
     train_num: usize,
+    rng: Rc<RefCell<ThreadRng>>,
+}
+
+impl PartialEq for TrainProps {
+    fn eq(&self, other: &Self) -> bool {
+        self.start_genes == other.start_genes
+            && self.on_train_end == other.on_train_end
+            && self.train_num == other.train_num
+            && Rc::ptr_eq(&self.rng, &other.rng)
+    }
 }
 
 enum TrainMsg {
@@ -536,6 +599,7 @@ impl Component for TrainScene {
             start_genes,
             on_train_end,
             train_num,
+            rng,
         } = ctx.props();
         let json = serde_json::to_value(start_genes).unwrap();
         Self {
@@ -550,6 +614,7 @@ impl Component for TrainScene {
             start_genes,
             on_train_end,
             train_num,
+            rng,
         } = ctx.props();
         html! {
             <>
@@ -561,14 +626,15 @@ impl Component for TrainScene {
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
         match msg {
             TrainMsg::TrainStart => {
-                let mut rng = thread_rng();
-                self.genes = traint_from_gene(self.genes.clone(), 0, &mut rng);
-                self.num += 1;
                 let TrainProps {
                     start_genes,
                     on_train_end,
                     train_num,
+                    rng,
                 } = ctx.props();
+                self.genes =
+                    traint_from_gene(self.genes.clone(), 0, rng.deref().borrow_mut().deref_mut());
+                self.num += 1;
                 if self.num == *train_num {
                     on_train_end.emit(self.genes.clone())
                 }
@@ -590,6 +656,7 @@ struct App {
     genes: Vec<Gene>,
     num: usize,
     scene: Scene,
+    rng: Rc<RefCell<ThreadRng>>,
 }
 
 enum Msg {
@@ -608,6 +675,7 @@ impl Component for App {
             genes,
             num: 0,
             scene: Scene::Start,
+            rng: Rc::new(RefCell::new(rng)),
         }
     }
     fn view(&self, ctx: &Context<Self>) -> Html {
@@ -621,7 +689,11 @@ impl Component for App {
             Scene::Game => {
                 let on_end = ctx.link().callback(|_| Msg::GameEnd);
                 html! {
-                    <GameWatchScene genes={self.genes.clone()} on_end={on_end}/>
+                    <GameWatchScene
+                        genes={self.genes.clone()}
+                        on_end={on_end}
+                        rng={self.rng.clone()}
+                    />
                 }
             }
             Scene::Train => {
@@ -631,6 +703,7 @@ impl Component for App {
                         start_genes={self.genes.clone()}
                         on_train_end={on_train_end}
                         train_num={30}
+                        rng={self.rng.clone()}
                     />
                 }
             }
