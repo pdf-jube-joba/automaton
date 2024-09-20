@@ -5,7 +5,7 @@ use rand::prelude::*;
 use serde::Serialize;
 use std::borrow::BorrowMut;
 use std::cell::RefCell;
-use std::ops::{Deref, DerefMut};
+use std::ops::{Add, AddAssign, Deref, DerefMut, Index, IndexMut};
 use std::rc::Rc;
 use wasm_bindgen::JsValue;
 use yew::prelude::*;
@@ -26,14 +26,14 @@ const RECOVER: usize = 5;
 
 const CHAN_NUM: usize = 50;
 
+// MIX_NUM * (MIX - 1) + MUT_NUM * MUT_CPY <= CHAN_NUM
 const MIX_NUM: usize = 5;
 const MUT_NUM: usize = 5;
 const MUT_CPY: usize = 2;
 const MUT_MUCH: usize = 100;
 
 const TRAIN_STEPMAX: usize = 1000;
-const TRAIN_NUM: usize = 20;
-const TRAIN_B: usize = 20;
+const TRAIN_NUM: usize = 10;
 
 // 表示するときのマスの大きさ
 const LEN: usize = 5;
@@ -42,7 +42,7 @@ pub fn log<T: AsRef<str>>(str: T) {
     web_sys::console::log_1(&JsValue::from_str(str.as_ref()))
 }
 
-#[derive(Debug, Clone, PartialEq, Properties)]
+#[derive(Debug, Clone, PartialEq)]
 struct Field {
     field: [[bool; W]; H],
 }
@@ -64,9 +64,53 @@ impl Field {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Pos(usize, usize);
+
+impl Pos {
+    fn generate_random<T>(rng: &mut T) -> Self
+    where
+        T: BorrowMut<ThreadRng>,
+    {
+        Pos(
+            rng.borrow_mut().gen_range(0..H),
+            rng.borrow_mut().gen_range(0..W),
+        )
+    }
+}
+
+impl Add<(isize, isize)> for Pos {
+    type Output = Self;
+    fn add(self, rhs: (isize, isize)) -> Self::Output {
+        Pos(
+            (self.0 as isize + rhs.0).rem_euclid(H as isize) as usize,
+            (self.1 as isize + rhs.1).rem_euclid(W as isize) as usize,
+        )
+    }
+}
+
+impl AddAssign<(isize, isize)> for Pos {
+    fn add_assign(&mut self, rhs: (isize, isize)) {
+        *self = *self + rhs;
+    }
+}
+
+impl Index<Pos> for Field {
+    type Output = bool;
+    fn index(&self, index: Pos) -> &Self::Output {
+        &self.field[index.0][index.1]
+    }
+}
+
+impl IndexMut<Pos> for Field {
+    fn index_mut(&mut self, index: Pos) -> &mut Self::Output {
+        &mut self.field[index.0][index.1]
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct Chan {
-    pos: (usize, usize),
+    pos: Pos,
     hp: usize,
     gene: Gene,
     mem: u8,
@@ -78,16 +122,41 @@ impl Chan {
     where
         T: BorrowMut<ThreadRng>,
     {
-        let pos = (
-            rng.borrow_mut().gen_range(0..H),
-            rng.borrow_mut().gen_range(0..W),
-        );
         Chan {
-            pos,
+            pos: Pos::generate_random(rng),
             hp: MAXHP,
             gene,
             mem: 0,
             ori: Ori::U,
+        }
+    }
+
+    fn fix_act(&mut self, action: Action) {
+        match action {
+            Action::Forword => {
+                let diff = rotate_from_chan((-1, 0), self.ori);
+                self.pos += diff;
+            }
+            Action::Back => {
+                let diff = rotate_from_chan((1, 0), self.ori);
+                self.pos += diff;
+            }
+            Action::TurnRight => {
+                self.ori = match self.ori {
+                    Ori::U => Ori::R,
+                    Ori::D => Ori::L,
+                    Ori::R => Ori::D,
+                    Ori::L => Ori::U,
+                };
+            }
+            Action::TurnLeft => {
+                self.ori = match self.ori {
+                    Ori::U => Ori::L,
+                    Ori::D => Ori::R,
+                    Ori::R => Ori::U,
+                    Ori::L => Ori::D,
+                };
+            }
         }
     }
 }
@@ -122,20 +191,29 @@ impl Gene {
     where
         F: Fn((isize, isize)) -> bool,
     {
-        let mut index: u16 = mem as u16;
+        // x\y -1  0  1
+        // -1   7  6  5
+        //  0   4  x  0
+        //  1   1  2  3
+        let mut surr_index: u8 = 0;
         for i in -1..=1 {
             for j in -1..=1 {
-                if surr((i, j)) {
+                if (i != 0 && j != 0) && surr((i, j)) {
                     let s = 3 * i + j;
-                    let s = if s < 0 { -s + 3 } else { s - 1 };
-                    index |= 1 << (8 + s);
+                    let s = if s < 0 {
+                        (-s + 3) as u32
+                    } else {
+                        (s - 1) as u32
+                    };
+                    surr_index |= 1_u8.checked_shl(s).unwrap();
                 }
             }
         }
+        let index: u16 = mem as u16 + ((surr_index as u16).checked_shl(8).unwrap());
         &self.0[index as usize]
     }
 
-    fn random<T>(rng: &mut T) -> Self
+    fn generate_random<T>(rng: &mut T) -> Self
     where
         T: BorrowMut<ThreadRng>,
     {
@@ -151,11 +229,11 @@ impl Gene {
         Self(gene)
     }
 
-    fn mutate<T>(&mut self, num: usize, rng: &mut T)
+    fn mutate<T>(&mut self, rng: &mut T)
     where
         T: BorrowMut<ThreadRng>,
     {
-        for _ in 0..num {
+        for _ in 0..MUT_MUCH {
             let i = rng.borrow_mut().gen_range(0..MOVE_NUM);
             let o = match rng.borrow_mut().gen_range(0..4) {
                 0 => Action::Forword,
@@ -180,18 +258,12 @@ impl Gene {
     }
 }
 
-fn goto(pos: (usize, usize), diff: (isize, isize)) -> (usize, usize) {
-    let i = (pos.0 as isize + diff.0).rem_euclid(H as isize);
-    let j = (pos.1 as isize + diff.1).rem_euclid(W as isize);
-    (i as usize, j as usize)
-}
-
 fn rotate_from_chan(diff: (isize, isize), ori: Ori) -> (isize, isize) {
     match ori {
         Ori::U => diff,
         Ori::D => (-diff.0, -diff.1),
-        Ori::R => (-diff.1, diff.0),
-        Ori::L => (diff.1, -diff.0),
+        Ori::R => (diff.1, -diff.0),
+        Ori::L => (-diff.1, diff.0),
     }
 }
 
@@ -210,7 +282,7 @@ impl OneGame {
         let field = Field::random(rng);
         // log("A");
         let chans = (0..CHAN_NUM)
-            .map(|_| Ok(Chan::spawn(Gene::random(rng), rng)))
+            .map(|_| Ok(Chan::spawn(Gene::generate_random(rng), rng)))
             .collect::<Vec<_>>();
         // log("B");
         Self {
@@ -219,6 +291,7 @@ impl OneGame {
             chans,
         }
     }
+
     fn from_gene<T>(genes: Vec<Gene>, rng: &mut T) -> Self
     where
         T: BorrowMut<ThreadRng>,
@@ -279,7 +352,7 @@ where
     for i in 0..MUT_NUM {
         for _ in 0..MUT_CPY {
             let mut new_gene = genes[i].clone();
-            new_gene.mutate(MUT_MUCH, rng);
+            new_gene.mutate(rng);
             new_genes.push(new_gene);
         }
     }
@@ -287,6 +360,37 @@ where
     let l = genes.len() - new_genes.len();
     new_genes.extend(genes[0..l].to_owned());
     new_genes
+}
+
+impl OneGame {
+    fn step(&mut self) {
+        let OneGame {
+            remain,
+            field,
+            chans,
+        } = self;
+        for chan_opt in chans {
+            let Ok(chan) = chan_opt else {
+                continue;
+            };
+            let surr = |diff: (isize, isize)| -> bool {
+                let diff = rotate_from_chan(diff, chan.ori);
+                field[chan.pos + diff]
+            };
+            let act = *chan.gene.get_action(surr, chan.mem);
+            chan.fix_act(act);
+            if field[chan.pos] {
+                chan.hp = std::cmp::max(chan.hp + RECOVER, MAXHP);
+                field[chan.pos] = false;
+            }
+            if chan.hp == 0 {
+                *chan_opt = Err((*remain, chan.gene.clone()));
+                *remain -= 1;
+            } else {
+                chan.hp -= 1;
+            }
+        }
+    }
 }
 
 fn train<T>(rng: &mut T) -> Vec<Gene>
@@ -309,7 +413,7 @@ where
     game.get_genes_ordered()
 }
 
-fn traint_from_gene<T>(genes: Vec<Gene>, num: usize, rng: &mut T) -> Vec<Gene>
+fn train_from_gene<T>(genes: Vec<Gene>, num: usize, rng: &mut T) -> Vec<Gene>
 where
     T: BorrowMut<ThreadRng>,
 {
@@ -326,63 +430,6 @@ where
         break 'a;
     }
     game.get_genes_ordered()
-}
-
-impl OneGame {
-    fn step(&mut self) {
-        let OneGame {
-            remain,
-            field,
-            chans,
-        } = self;
-        for chan_opt in chans {
-            let Ok(chan) = chan_opt else {
-                continue;
-            };
-            let surr = |diff: (isize, isize)| -> bool {
-                let diff = rotate_from_chan(diff, chan.ori);
-                let (i, j) = goto(chan.pos, diff);
-                field.field[i][j]
-            };
-            let act = chan.gene.get_action(surr, chan.mem);
-            match act {
-                Action::Forword => {
-                    let diff = rotate_from_chan((1, 0), chan.ori);
-                    chan.pos = goto(chan.pos, diff);
-                }
-                Action::Back => {
-                    let diff = rotate_from_chan((-1, 0), chan.ori);
-                    chan.pos = goto(chan.pos, diff);
-                }
-                Action::TurnRight => {
-                    chan.ori = match chan.ori {
-                        Ori::U => Ori::R,
-                        Ori::D => Ori::L,
-                        Ori::R => Ori::D,
-                        Ori::L => Ori::U,
-                    };
-                }
-                Action::TurnLeft => {
-                    chan.ori = match chan.ori {
-                        Ori::U => Ori::L,
-                        Ori::D => Ori::R,
-                        Ori::R => Ori::U,
-                        Ori::L => Ori::D,
-                    };
-                }
-            }
-            if field.field[chan.pos.0][chan.pos.1] {
-                chan.hp = std::cmp::max(chan.hp + RECOVER, MAXHP);
-                field.field[chan.pos.0][chan.pos.1] = false;
-            }
-            if chan.hp == 0 {
-                *chan_opt = Err((*remain, chan.gene.clone()));
-                *remain -= 1;
-            } else {
-                chan.hp -= 1;
-            }
-        }
-    }
 }
 
 fn onegame_view(
@@ -492,7 +539,6 @@ impl Component for StartScene {
 }
 
 struct GameWatchScene {
-    json_gene: serde_json::Value,
     game: OneGame,
     interval: Interval,
 }
@@ -517,12 +563,7 @@ impl Component for GameWatchScene {
         let callback = ctx.link().callback(|_| GameWatchMsg::Tick);
         let interval = Interval::new(10, move || callback.emit(()));
         let game = OneGame::from_gene(genes.to_vec(), &mut rng);
-        let json_gene = serde_json::to_value(genes).unwrap();
-        Self {
-            json_gene,
-            game,
-            interval,
-        }
+        Self { game, interval }
     }
     fn view(&self, _ctx: &Context<Self>) -> Html {
         html! {
@@ -604,7 +645,7 @@ impl Component for TrainScene {
                     train_num,
                 } = ctx.props();
                 let mut rng = thread_rng();
-                self.genes = traint_from_gene(self.genes.clone(), 0, &mut rng);
+                self.genes = train_from_gene(self.genes.clone(), 1, &mut rng);
                 self.num += 1;
                 if self.num == *train_num {
                     on_train_end.emit(self.genes.clone())
@@ -640,7 +681,9 @@ impl Component for App {
     type Properties = ();
     fn create(ctx: &Context<Self>) -> Self {
         let mut rng = thread_rng();
-        let genes = (0..CHAN_NUM).map(|_| Gene::random(&mut rng)).collect();
+        let genes = (0..CHAN_NUM)
+            .map(|_| Gene::generate_random(&mut rng))
+            .collect();
         Self {
             genes,
             num: 0,
@@ -670,7 +713,7 @@ impl Component for App {
                     <TrainScene
                         start_genes={self.genes.clone()}
                         on_train_end={on_train_end}
-                        train_num={50}
+                        train_num={TRAIN_NUM}
                     />
                 }
             }
@@ -798,5 +841,37 @@ impl Component for JsonFileReadView {
                 true
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::u8;
+
+    use super::*;
+    #[test]
+    fn test1() {
+        let pos0 = Pos(0, 0);
+        let pos1 = Pos(H - 1, W - 1);
+        assert_eq!(pos0 + (-1, -1), pos1);
+        assert_eq!(pos1 + (1, 1), pos0);
+
+        // x\y -1, 0, 1
+        // -1
+        //  0      ↑
+        //  1
+        let diff = (1, 0);
+        assert_eq!(rotate_from_chan(diff, Ori::U), (1, 0));
+        assert_eq!(rotate_from_chan(diff, Ori::D), (-1, 0));
+        assert_eq!(rotate_from_chan(diff, Ori::L), (0, 1));
+        assert_eq!(rotate_from_chan(diff, Ori::R), (0, -1));
+    }
+    #[test]
+    fn train_test() {
+        let a: u8 = u8::MAX;
+        let b: u8 = u8::MAX;
+        let c: u16 = (a as u16) + ((b as u16) << 8);
+        let mut rng = thread_rng();
+        train(&mut rng);
     }
 }
