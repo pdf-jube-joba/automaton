@@ -317,6 +317,7 @@ fn rotate_from_chan(diff: (isize, isize), ori: Ori) -> (isize, isize) {
 
 #[derive(Debug, Clone, PartialEq, Properties)]
 struct OneGame {
+    step: usize,
     remain: usize,
     field: Field,
     chans: Vec<Result<Chan, (usize, Gene)>>,
@@ -328,12 +329,28 @@ impl OneGame {
         T: BorrowMut<ThreadRng>,
     {
         let field = Field::random(rng);
-        // log("A");
         let chans = (0..CHAN_NUM)
             .map(|_| Ok(Chan::spawn(Gene::generate_random(rng), rng)))
             .collect::<Vec<_>>();
-        // log("B");
         Self {
+            step: 0,
+            remain: CHAN_NUM,
+            field,
+            chans,
+        }
+    }
+
+    fn from_gene_and_field<T>(rng: &mut T, genes: Vec<Gene>, field: Field) -> Self
+    where
+        T: BorrowMut<ThreadRng>,
+    {
+        let chans = genes
+            .into_iter()
+            .map(|gene| Ok(Chan::spawn(gene, rng)))
+            .collect();
+
+        Self {
+            step: 0,
             remain: CHAN_NUM,
             field,
             chans,
@@ -351,6 +368,7 @@ impl OneGame {
             .map(|gene| Ok(Chan::spawn(gene, rng)))
             .collect();
         Self {
+            step: 0,
             remain: CHAN_NUM,
             field,
             chans,
@@ -363,6 +381,7 @@ impl OneGame {
 
     fn get_genes_ordered(&self) -> Vec<Gene> {
         let OneGame {
+            step: _,
             remain: _,
             field: _,
             chans,
@@ -371,7 +390,7 @@ impl OneGame {
         let mut gene_order: Vec<_> = chans
             .iter()
             .map(|result| match result {
-                Ok(chan) => ((0, chan.hp), chan.gene.clone()),
+                Ok(chan) => ((0, MAXHP - chan.hp), chan.gene.clone()),
                 Err((order, gene)) => ((1, *order), gene.clone()),
             })
             .collect();
@@ -406,13 +425,15 @@ where
     }
 
     let l = genes.len() - new_genes.len();
-    new_genes.extend(genes[0..l].to_owned());
+    new_genes.extend(genes[0..l].iter().cloned().rev());
+    new_genes.reverse();
     new_genes
 }
 
 impl OneGame {
     fn step(&mut self) {
         let OneGame {
+            step,
             remain,
             field,
             chans,
@@ -438,6 +459,7 @@ impl OneGame {
                 chan.hp -= 1;
             }
         }
+        *step += 1;
     }
 }
 
@@ -461,11 +483,16 @@ where
     game.get_genes_ordered()
 }
 
-fn train_from_gene<T>(genes: Vec<Gene>, num: usize, rng: &mut T) -> Vec<Gene>
+fn train_from_gene_and_field<T>(
+    genes: Vec<Gene>,
+    field: Field,
+    num: usize,
+    rng: &mut T,
+) -> Vec<Gene>
 where
     T: BorrowMut<ThreadRng>,
 {
-    let mut game = OneGame::from_gene(genes, rng);
+    let mut game = OneGame::from_gene_and_field(rng, genes, field);
     'a: for i in 0..num {
         // log(format!("train {i}"));
         for _ in 0..TRAIN_STEPMAX {
@@ -482,6 +509,7 @@ where
 
 fn onegame_view(
     OneGame {
+        step,
         remain: _,
         field,
         chans,
@@ -489,6 +517,7 @@ fn onegame_view(
 ) -> Html {
     html! {
         <>
+        {step} <br/>
         <svg version="1.1"
         width={(W * LEN).to_string()} height={(H * LEN).to_string()}
         xmlns="http://www.w3.org/2000/svg">
@@ -586,6 +615,7 @@ impl Component for StartScene {
                     gene.mutate(&mut rng);
                     v.push(gene)
                 }
+                log(format!("{u}"));
                 (u, v)
             }
             _ => (
@@ -669,6 +699,7 @@ struct TrainScene {
 #[derive(Debug, Clone, PartialEq, Properties)]
 struct TrainProps {
     start_genes: Vec<Gene>,
+    start_field: Field, // 固定して乱数生成を少なく
     on_train_end: Callback<Vec<Gene>>,
     train_num: usize,
 }
@@ -685,12 +716,11 @@ impl Component for TrainScene {
         let interval = Interval::new(10, move || callback.emit(()));
         let TrainProps {
             start_genes,
-            on_train_end,
-            train_num,
+            start_field: _,
+            on_train_end: _,
+            train_num: _,
         } = ctx.props();
-        // let json = serde_json::to_value(start_genes).unwrap();
         Self {
-            // start_genes: json,
             genes: start_genes.clone(),
             num: 0,
             interval,
@@ -698,8 +728,9 @@ impl Component for TrainScene {
     }
     fn view(&self, ctx: &Context<Self>) -> Html {
         let TrainProps {
-            start_genes,
-            on_train_end,
+            start_genes: _,
+            start_field: _,
+            on_train_end: _,
             train_num,
         } = ctx.props();
         html! {
@@ -713,12 +744,14 @@ impl Component for TrainScene {
         match msg {
             TrainMsg::TrainStart => {
                 let TrainProps {
-                    start_genes,
+                    start_genes: _,
+                    start_field,
                     on_train_end,
                     train_num,
                 } = ctx.props();
                 let mut rng = thread_rng();
-                self.genes = train_from_gene(self.genes.clone(), 1, &mut rng);
+                self.genes =
+                    train_from_gene_and_field(self.genes.clone(), start_field.clone(), 1, &mut rng);
                 self.num += 1;
                 if self.num == *train_num {
                     on_train_end.emit(self.genes.clone())
@@ -782,9 +815,12 @@ impl Component for App {
             }
             Scene::Train => {
                 let on_train_end = ctx.link().callback(Msg::TrainEnd);
+                let mut rng = thread_rng();
+                let start_field = Field::random(&mut rng);
                 html! {
                     <TrainScene
                         start_genes={self.genes.clone()}
+                        start_field={start_field}
                         on_train_end={on_train_end}
                         train_num={TRAIN_NUM}
                     />
@@ -818,109 +854,6 @@ impl Component for App {
         true
     }
 }
-
-// #[derive(Debug, Clone, PartialEq, Properties)]
-// pub struct JsonFileSaveProps {
-//     pub json_value: serde_json::Value,
-// }
-
-// #[function_component(JsonFileSaveView)]
-// pub fn json_file_save_view(JsonFileSaveProps { json_value }: &JsonFileSaveProps) -> Html {
-//     let head_string = "data:text/json;charset=utf-8,";
-//     let data = json_value.to_string();
-//     html! {
-//         <a href={format!("{}{}", head_string, data)} download="data.json"> {"save as json"}</a>
-//     }
-// }
-
-// pub enum JsonFileReadMsg {
-//     Read(DragEvent),
-//     LoadEnd(Result<String, anyhow::Error>),
-// }
-
-// #[derive(Debug, Clone, PartialEq, Properties)]
-// pub struct JsonFileReadProps {
-//     pub on_drop_json: Callback<serde_json::Value>,
-// }
-
-// #[derive(Debug, Default)]
-// pub struct JsonFileReadView {
-//     reader: Option<FileReader>,
-// }
-
-// impl Component for JsonFileReadView {
-//     type Message = JsonFileReadMsg;
-//     type Properties = JsonFileReadProps;
-//     fn create(_ctx: &Context<Self>) -> Self {
-//         Self::default()
-//     }
-//     fn view(&self, ctx: &Context<Self>) -> Html {
-//         html! {
-//             <>
-//             <div id="drop-container"
-//                 ondrop={ctx.link().callback(|event: DragEvent|{
-//                     event.prevent_default();
-//                     JsonFileReadMsg::Read(event)
-//                 })}
-//                 ondragover={Callback::from(|event: DragEvent| {
-//                     event.prevent_default();
-//                 })}
-//                 ondragenter={Callback::from(|event: DragEvent| {
-//                     event.prevent_default();
-//                 })}
-//             > <p> {"drop here"} </p> </div>
-//             </>
-//         }
-//     }
-//     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
-//         match msg {
-//             JsonFileReadMsg::Read(dragevent) => {
-//                 let read = move |event: DragEvent| -> Result<FileReader, anyhow::Error> {
-//                     let Some(data_transfer) = event.data_transfer() else {
-//                         bail!("data transfer fail")
-//                     };
-//                     let Some(files) = data_transfer.files() else {
-//                         bail!("files fail")
-//                     };
-//                     let Some(file) = files.get(0) else {
-//                         bail!("file fail")
-//                     };
-//                     let file: gloo::file::File = file.into();
-//                     let link = ctx.link().clone();
-//                     let task = gloo::file::callbacks::read_as_text(&file, move |res| {
-//                         link.send_message(JsonFileReadMsg::LoadEnd(res.map_err(|e| e.into())))
-//                     });
-//                     Ok(task)
-//                 };
-//                 match read(dragevent) {
-//                     Ok(task) => {
-//                         self.reader = Some(task);
-//                     }
-//                     Err(err) => {
-//                         log(format!("{err:?}"));
-//                     }
-//                 }
-//                 true
-//             }
-//             JsonFileReadMsg::LoadEnd(res) => {
-//                 match res {
-//                     Ok(string) => match serde_json::from_str(&string) {
-//                         Ok(val) => {
-//                             ctx.props().on_drop_json.emit(val);
-//                         }
-//                         Err(err) => {
-//                             log(format!("{err:?}"));
-//                         }
-//                     },
-//                     Err(err) => {
-//                         log(format!("{err:?}"));
-//                     }
-//                 }
-//                 true
-//             }
-//         }
-//     }
-// }
 
 #[cfg(test)]
 mod tests {
