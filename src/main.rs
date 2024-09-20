@@ -1,5 +1,6 @@
 use anyhow::bail;
 use gloo::file::callbacks::FileReader;
+use gloo::storage::Storage;
 use gloo::timers::callback::Interval;
 use rand::prelude::*;
 use serde::Serialize;
@@ -34,6 +35,9 @@ const MUT_MUCH: usize = 100;
 
 const TRAIN_STEPMAX: usize = 1000;
 const TRAIN_NUM: usize = 10;
+
+const LOCAL_STORAGE_GENE_KEY: &str = "GENE";
+const LOCAL_STORAGE_NUM_KEY: &str = "NUM";
 
 // 表示するときのマスの大きさ
 const LEN: usize = 5;
@@ -108,86 +112,82 @@ impl IndexMut<Pos> for Field {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-struct Chan {
-    pos: Pos,
-    hp: usize,
-    gene: Gene,
-    mem: u8,
-    ori: Ori,
-}
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+struct Mem(bool, bool, bool, bool, bool, bool);
 
-impl Chan {
-    fn spawn<T>(gene: Gene, rng: &mut T) -> Self
-    where
-        T: BorrowMut<ThreadRng>,
-    {
-        Chan {
-            pos: Pos::generate_random(rng),
-            hp: MAXHP,
-            gene,
-            mem: 0,
-            ori: Ori::U,
-        }
-    }
-
-    fn fix_act(&mut self, action: Action) {
-        match action {
-            Action::Forword => {
-                let diff = rotate_from_chan((-1, 0), self.ori);
-                self.pos += diff;
+impl From<Mem> for u8 {
+    fn from(value: Mem) -> Self {
+        let f = |b: bool, i: u8| -> u8 {
+            if b {
+                1 << i
+            } else {
+                0
             }
-            Action::Back => {
-                let diff = rotate_from_chan((1, 0), self.ori);
-                self.pos += diff;
-            }
-            Action::TurnRight => {
-                self.ori = match self.ori {
-                    Ori::U => Ori::R,
-                    Ori::D => Ori::L,
-                    Ori::R => Ori::D,
-                    Ori::L => Ori::U,
-                };
-            }
-            Action::TurnLeft => {
-                self.ori = match self.ori {
-                    Ori::U => Ori::L,
-                    Ori::D => Ori::R,
-                    Ori::R => Ori::U,
-                    Ori::L => Ori::D,
-                };
-            }
-        }
+        };
+        f(value.0, 0)
+            + f(value.1, 1)
+            + f(value.2, 2)
+            + f(value.3, 3)
+            + f(value.4, 4)
+            + f(value.5, 5)
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum Ori {
-    U,
-    D,
-    R,
-    L,
-}
-
-const MOVE_NUM: usize = 2_usize.pow((3 * 3) as u32 - 1) * (2_usize.pow(8));
-
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-struct Gene(Vec<Action>);
-
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
-enum Action {
-    #[serde(rename = "F")]
+enum Move {
     Forword,
-    #[serde(rename = "B")]
     Back,
-    #[serde(rename = "R")]
     TurnRight,
-    #[serde(rename = "L")]
     TurnLeft,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Action(Mem, Move);
+
+impl Action {
+    fn generate_random<T>(rng: &mut T) -> Self
+    where
+        T: BorrowMut<ThreadRng>,
+    {
+        let u: u8 = rng.borrow_mut().gen();
+        u.into()
+    }
+}
+
+impl From<Action> for u8 {
+    fn from(Action(value0, value1): Action) -> Self {
+        let v0: u8 = value0.into();
+        let v1 = match value1 {
+            Move::Forword => 0,
+            Move::Back => 1,
+            Move::TurnRight => 2,
+            Move::TurnLeft => 3,
+        } * (1 << 6);
+        v0 + v1
+    }
+}
+
+impl From<u8> for Action {
+    fn from(value: u8) -> Self {
+        let f = |i: u8| -> bool { value & (1 << i) != 0 };
+        let move_action = match (f(6), f(7)) {
+            (false, false) => Move::Forword,
+            (true, false) => Move::Back,
+            (false, true) => Move::TurnRight,
+            (true, true) => Move::TurnLeft,
+        };
+        let mem = Mem(f(0), f(1), f(2), f(3), f(4), f(5));
+        Action(mem, move_action)
+    }
+}
+
+const MOVE_NUM: usize = 2_usize.pow((3 * 3) as u32 - 1) * (2_usize.pow(6));
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+struct Gene(#[serde(with = "serde_bytes")] Vec<u8>);
+
 impl Gene {
-    fn get_action<F>(&self, surr: F, mem: u8) -> &Action
+    fn get_action<F>(&self, surr: F, mem: Mem) -> Action
     where
         F: Fn((isize, isize)) -> bool,
     {
@@ -209,23 +209,16 @@ impl Gene {
                 }
             }
         }
-        let index: u16 = mem as u16 + ((surr_index as u16).checked_shl(8).unwrap());
-        &self.0[index as usize]
+        let index: u16 = surr_index as u16 + u8::from(mem) as u16;
+        let u = self.0[index as usize];
+        u.into()
     }
 
     fn generate_random<T>(rng: &mut T) -> Self
     where
         T: BorrowMut<ThreadRng>,
     {
-        let gene = (0..MOVE_NUM)
-            .map(|_| match rng.borrow_mut().gen_range(0..4) {
-                0 => Action::Forword,
-                1 => Action::Back,
-                2 => Action::TurnLeft,
-                3 => Action::TurnRight,
-                _ => unreachable!(),
-            })
-            .collect();
+        let gene = (0..MOVE_NUM).map(|_| rng.borrow_mut().gen()).collect();
         Self(gene)
     }
 
@@ -235,14 +228,7 @@ impl Gene {
     {
         for _ in 0..MUT_MUCH {
             let i = rng.borrow_mut().gen_range(0..MOVE_NUM);
-            let o = match rng.borrow_mut().gen_range(0..4) {
-                0 => Action::Forword,
-                1 => Action::Back,
-                2 => Action::TurnLeft,
-                3 => Action::TurnRight,
-                _ => unreachable!(),
-            };
-            self.0[i] = o;
+            self.0[i] = rng.borrow_mut().gen();
         }
     }
 
@@ -256,6 +242,68 @@ impl Gene {
             }
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct Chan {
+    pos: Pos,
+    hp: usize,
+    gene: Gene,
+    mem: Mem,
+    ori: Ori,
+}
+
+impl Chan {
+    fn spawn<T>(gene: Gene, rng: &mut T) -> Self
+    where
+        T: BorrowMut<ThreadRng>,
+    {
+        Chan {
+            pos: Pos::generate_random(rng),
+            hp: MAXHP,
+            gene,
+            mem: Mem::default(),
+            ori: Ori::U,
+        }
+    }
+
+    fn fix_act(&mut self, Action(mem, move_action): Action) {
+        match move_action {
+            Move::Forword => {
+                let diff = rotate_from_chan((-1, 0), self.ori);
+                self.pos += diff;
+            }
+            Move::Back => {
+                let diff = rotate_from_chan((1, 0), self.ori);
+                self.pos += diff;
+            }
+            Move::TurnRight => {
+                self.ori = match self.ori {
+                    Ori::U => Ori::R,
+                    Ori::D => Ori::L,
+                    Ori::R => Ori::D,
+                    Ori::L => Ori::U,
+                };
+            }
+            Move::TurnLeft => {
+                self.ori = match self.ori {
+                    Ori::U => Ori::L,
+                    Ori::D => Ori::R,
+                    Ori::R => Ori::U,
+                    Ori::L => Ori::D,
+                };
+            }
+        }
+        self.mem = mem;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Ori {
+    U,
+    D,
+    R,
+    L,
 }
 
 fn rotate_from_chan(diff: (isize, isize), ori: Ori) -> (isize, isize) {
@@ -377,7 +425,7 @@ impl OneGame {
                 let diff = rotate_from_chan(diff, chan.ori);
                 field[chan.pos + diff]
             };
-            let act = *chan.gene.get_action(surr, chan.mem);
+            let act = chan.gene.get_action(surr, chan.mem);
             chan.fix_act(act);
             if field[chan.pos] {
                 chan.hp = std::cmp::max(chan.hp + RECOVER, MAXHP);
@@ -499,12 +547,12 @@ struct StartScene {}
 
 #[derive(Debug, Clone, PartialEq, Properties)]
 struct StartSceneProps {
-    on_choose: Callback<Option<Vec<Gene>>>,
+    on_choose: Callback<(usize, Vec<Gene>)>,
 }
 
 enum StartSceneMsg {
     Random,
-    Read(serde_json::Value),
+    Read,
 }
 
 impl Component for StartScene {
@@ -515,25 +563,39 @@ impl Component for StartScene {
     }
     fn view(&self, ctx: &Context<Self>) -> Html {
         let on_ramdom = ctx.link().callback(|_: MouseEvent| StartSceneMsg::Random);
-        let on_drop_json = ctx.link().callback(StartSceneMsg::Read);
+        let on_read_localstorage = ctx.link().callback(|_: MouseEvent| StartSceneMsg::Read);
         html! {
             <>
             <button onclick={on_ramdom}> {"random"} </button>
-            <JsonFileReadView on_drop_json={on_drop_json} />
+            <button onclick={on_read_localstorage}> {"read from local storage"} </button>
             </>
         }
     }
     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
         let StartSceneProps { on_choose } = ctx.props();
-        match msg {
-            StartSceneMsg::Random => {
-                on_choose.emit(None);
-            }
-            StartSceneMsg::Read(genes) => {
-                let genes = serde_json::from_value(genes).unwrap();
-                on_choose.emit(Some(genes));
-            }
+        let mut rng = thread_rng();
+        let res = read();
+        if let Err(ref err) = &res {
+            log(format!("{err}"))
         }
+        let n = match (msg, res) {
+            (StartSceneMsg::Read, Ok((u, gene))) => {
+                let mut v = Vec::with_capacity(CHAN_NUM);
+                for _ in 0..CHAN_NUM {
+                    let mut gene: Gene = gene.clone();
+                    gene.mutate(&mut rng);
+                    v.push(gene)
+                }
+                (u, v)
+            }
+            _ => (
+                0,
+                (0..CHAN_NUM)
+                    .map(|_| Gene::generate_random(&mut rng))
+                    .collect(),
+            ),
+        };
+        on_choose.emit(n);
         true
     }
 }
@@ -586,8 +648,19 @@ impl Component for GameWatchScene {
     }
 }
 
+fn save((u, gene): (usize, Gene)) -> Result<(), gloo::storage::errors::StorageError> {
+    gloo::storage::LocalStorage::set(LOCAL_STORAGE_NUM_KEY, u)?;
+    gloo::storage::LocalStorage::set(LOCAL_STORAGE_GENE_KEY, gene)?;
+    Ok(())
+}
+
+fn read() -> Result<(usize, Gene), gloo::storage::errors::StorageError> {
+    let u = gloo::storage::LocalStorage::get(LOCAL_STORAGE_NUM_KEY)?;
+    let gene = gloo::storage::LocalStorage::get(LOCAL_STORAGE_GENE_KEY)?;
+    Ok((u, gene))
+}
 struct TrainScene {
-    start_genes: serde_json::Value,
+    // start_genes: serde_json::Value,
     genes: Vec<Gene>,
     num: usize,
     interval: Interval,
@@ -615,9 +688,9 @@ impl Component for TrainScene {
             on_train_end,
             train_num,
         } = ctx.props();
-        let json = serde_json::to_value(start_genes).unwrap();
+        // let json = serde_json::to_value(start_genes).unwrap();
         Self {
-            start_genes: json,
+            // start_genes: json,
             genes: start_genes.clone(),
             num: 0,
             interval,
@@ -632,7 +705,7 @@ impl Component for TrainScene {
         html! {
             <>
             {self.num} {"/"} {train_num}
-            <JsonFileSaveView json_value={self.start_genes.clone()} />
+            // <JsonFileSaveView json_value={self.start_genes.clone()} />
             </>
         }
     }
@@ -671,7 +744,7 @@ struct App {
 }
 
 enum Msg {
-    Start(Option<Vec<Gene>>),
+    Start((usize, Vec<Gene>)),
     GameEnd,
     TrainEnd(Vec<Gene>),
 }
@@ -721,18 +794,23 @@ impl Component for App {
     }
     fn update(&mut self, _ctx: &Context<Self>, msg: Self::Message) -> bool {
         match msg {
-            Msg::Start(genes) => {
-                if let Some(genes) = genes {
-                    self.genes = genes;
-                    self.scene = Scene::Game;
-                } else {
-                    self.scene = Scene::Train;
-                }
+            Msg::Start((num, genes)) => {
+                self.num = num;
+                self.genes = genes;
+                self.scene = Scene::Game;
             }
             Msg::GameEnd => {
+                if let Err(err) = save((self.num, self.genes[0].clone())) {
+                    log(format!("{err}"))
+                };
                 self.scene = Scene::Train;
             }
             Msg::TrainEnd(genes) => {
+                self.num += 1;
+                if let Err(err) = save((self.num, self.genes[0].clone())) {
+                    log(format!("{err}"))
+                };
+                log(format!("{}", self.num));
                 self.genes = genes;
                 self.scene = Scene::Game;
             }
@@ -741,108 +819,108 @@ impl Component for App {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Properties)]
-pub struct JsonFileSaveProps {
-    pub json_value: serde_json::Value,
-}
+// #[derive(Debug, Clone, PartialEq, Properties)]
+// pub struct JsonFileSaveProps {
+//     pub json_value: serde_json::Value,
+// }
 
-#[function_component(JsonFileSaveView)]
-pub fn json_file_save_view(JsonFileSaveProps { json_value }: &JsonFileSaveProps) -> Html {
-    let head_string = "data:text/json;charset=utf-8,";
-    let data = json_value.to_string();
-    html! {
-        <a href={format!("{}{}", head_string, data)} download="data.json"> {"save as json"}</a>
-    }
-}
+// #[function_component(JsonFileSaveView)]
+// pub fn json_file_save_view(JsonFileSaveProps { json_value }: &JsonFileSaveProps) -> Html {
+//     let head_string = "data:text/json;charset=utf-8,";
+//     let data = json_value.to_string();
+//     html! {
+//         <a href={format!("{}{}", head_string, data)} download="data.json"> {"save as json"}</a>
+//     }
+// }
 
-pub enum JsonFileReadMsg {
-    Read(DragEvent),
-    LoadEnd(Result<String, anyhow::Error>),
-}
+// pub enum JsonFileReadMsg {
+//     Read(DragEvent),
+//     LoadEnd(Result<String, anyhow::Error>),
+// }
 
-#[derive(Debug, Clone, PartialEq, Properties)]
-pub struct JsonFileReadProps {
-    pub on_drop_json: Callback<serde_json::Value>,
-}
+// #[derive(Debug, Clone, PartialEq, Properties)]
+// pub struct JsonFileReadProps {
+//     pub on_drop_json: Callback<serde_json::Value>,
+// }
 
-#[derive(Debug, Default)]
-pub struct JsonFileReadView {
-    reader: Option<FileReader>,
-}
+// #[derive(Debug, Default)]
+// pub struct JsonFileReadView {
+//     reader: Option<FileReader>,
+// }
 
-impl Component for JsonFileReadView {
-    type Message = JsonFileReadMsg;
-    type Properties = JsonFileReadProps;
-    fn create(_ctx: &Context<Self>) -> Self {
-        Self::default()
-    }
-    fn view(&self, ctx: &Context<Self>) -> Html {
-        html! {
-            <>
-            <div id="drop-container"
-                ondrop={ctx.link().callback(|event: DragEvent|{
-                    event.prevent_default();
-                    JsonFileReadMsg::Read(event)
-                })}
-                ondragover={Callback::from(|event: DragEvent| {
-                    event.prevent_default();
-                })}
-                ondragenter={Callback::from(|event: DragEvent| {
-                    event.prevent_default();
-                })}
-            > <p> {"drop here"} </p> </div>
-            </>
-        }
-    }
-    fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
-        match msg {
-            JsonFileReadMsg::Read(dragevent) => {
-                let read = move |event: DragEvent| -> Result<FileReader, anyhow::Error> {
-                    let Some(data_transfer) = event.data_transfer() else {
-                        bail!("data transfer fail")
-                    };
-                    let Some(files) = data_transfer.files() else {
-                        bail!("files fail")
-                    };
-                    let Some(file) = files.get(0) else {
-                        bail!("file fail")
-                    };
-                    let file: gloo::file::File = file.into();
-                    let link = ctx.link().clone();
-                    let task = gloo::file::callbacks::read_as_text(&file, move |res| {
-                        link.send_message(JsonFileReadMsg::LoadEnd(res.map_err(|e| e.into())))
-                    });
-                    Ok(task)
-                };
-                match read(dragevent) {
-                    Ok(task) => {
-                        self.reader = Some(task);
-                    }
-                    Err(err) => {
-                        log(format!("{err:?}"));
-                    }
-                }
-                true
-            }
-            JsonFileReadMsg::LoadEnd(res) => {
-                match res {
-                    Ok(string) => match serde_json::from_str(&string) {
-                        Ok(val) => {
-                            ctx.props().on_drop_json.emit(val);
-                        }
-                        Err(err) => {
-                            log(format!("{err:?}"));
-                        }
-                    },
-                    Err(err) => {
-                        log(format!("{err:?}"));
-                    }
-                }
-                true
-            }
-        }
-    }
-}
+// impl Component for JsonFileReadView {
+//     type Message = JsonFileReadMsg;
+//     type Properties = JsonFileReadProps;
+//     fn create(_ctx: &Context<Self>) -> Self {
+//         Self::default()
+//     }
+//     fn view(&self, ctx: &Context<Self>) -> Html {
+//         html! {
+//             <>
+//             <div id="drop-container"
+//                 ondrop={ctx.link().callback(|event: DragEvent|{
+//                     event.prevent_default();
+//                     JsonFileReadMsg::Read(event)
+//                 })}
+//                 ondragover={Callback::from(|event: DragEvent| {
+//                     event.prevent_default();
+//                 })}
+//                 ondragenter={Callback::from(|event: DragEvent| {
+//                     event.prevent_default();
+//                 })}
+//             > <p> {"drop here"} </p> </div>
+//             </>
+//         }
+//     }
+//     fn update(&mut self, ctx: &Context<Self>, msg: Self::Message) -> bool {
+//         match msg {
+//             JsonFileReadMsg::Read(dragevent) => {
+//                 let read = move |event: DragEvent| -> Result<FileReader, anyhow::Error> {
+//                     let Some(data_transfer) = event.data_transfer() else {
+//                         bail!("data transfer fail")
+//                     };
+//                     let Some(files) = data_transfer.files() else {
+//                         bail!("files fail")
+//                     };
+//                     let Some(file) = files.get(0) else {
+//                         bail!("file fail")
+//                     };
+//                     let file: gloo::file::File = file.into();
+//                     let link = ctx.link().clone();
+//                     let task = gloo::file::callbacks::read_as_text(&file, move |res| {
+//                         link.send_message(JsonFileReadMsg::LoadEnd(res.map_err(|e| e.into())))
+//                     });
+//                     Ok(task)
+//                 };
+//                 match read(dragevent) {
+//                     Ok(task) => {
+//                         self.reader = Some(task);
+//                     }
+//                     Err(err) => {
+//                         log(format!("{err:?}"));
+//                     }
+//                 }
+//                 true
+//             }
+//             JsonFileReadMsg::LoadEnd(res) => {
+//                 match res {
+//                     Ok(string) => match serde_json::from_str(&string) {
+//                         Ok(val) => {
+//                             ctx.props().on_drop_json.emit(val);
+//                         }
+//                         Err(err) => {
+//                             log(format!("{err:?}"));
+//                         }
+//                     },
+//                     Err(err) => {
+//                         log(format!("{err:?}"));
+//                     }
+//                 }
+//                 true
+//             }
+//         }
+//     }
+// }
 
 #[cfg(test)]
 mod tests {
@@ -865,6 +943,14 @@ mod tests {
         assert_eq!(rotate_from_chan(diff, Ori::D), (-1, 0));
         assert_eq!(rotate_from_chan(diff, Ori::L), (0, 1));
         assert_eq!(rotate_from_chan(diff, Ori::R), (0, -1));
+    }
+    #[test]
+    fn memact() {
+        for i in 0..u8::MAX {
+            let act: Action = i.into();
+            let u: u8 = act.into();
+            assert_eq!(i, u);
+        }
     }
     #[test]
     fn train_test() {
